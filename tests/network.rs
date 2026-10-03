@@ -212,7 +212,9 @@ async fn read_deadline_and_drop_cleanup() {
         .unwrap();
     assert!(response.starts_with(b"HTTP/1.1 400"));
     drop(server);
-    tokio::time::timeout(Duration::from_secs(1), async {
+    // Windows can spend over one second rejecting a connection to a closed
+    // loopback port. Allow that OS delay while still detecting a leaked listener.
+    tokio::time::timeout(Duration::from_secs(5), async {
         while TcpStream::connect(address).await.is_ok() {
             tokio::task::yield_now().await;
         }
