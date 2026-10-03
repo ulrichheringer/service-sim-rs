@@ -273,3 +273,48 @@ async fn invalid_configuration_is_rejected_and_head_has_no_body() {
         .ends_with(b"\r\n\r\n"));
     server.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn connection_limit_bounds_stalled_fault_tasks() {
+    let server = Server::with_limits(
+        vec![Rule::new("GET", "/test", Action::new(Behavior::Timeout))],
+        Limits {
+            connections: 1,
+            ..Limits::default()
+        },
+    )
+    .await
+    .unwrap();
+    let mut first = TcpStream::connect(server.address()).await.unwrap();
+    first.write_all(GET).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while server.hits(0) != Some(1) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut second = TcpStream::connect(server.address()).await.unwrap();
+    second.write_all(GET).await.unwrap();
+    let mut byte = [0];
+    assert!(
+        tokio::time::timeout(Duration::from_millis(40), second.read(&mut byte))
+            .await
+            .is_err()
+    );
+    assert_eq!(server.hits(0), Some(1));
+    server.shutdown().await.unwrap();
+    assert_eq!(first.read(&mut byte).await.unwrap(), 0);
+    // The unaccepted backlog socket can close orderly or receive a reset.
+    match tokio::time::timeout(Duration::from_secs(1), second.read(&mut byte))
+        .await
+        .unwrap()
+    {
+        Ok(0) => {}
+        Err(error) => assert!(matches!(
+            error.kind(),
+            io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
+        )),
+        other => panic!("unexpected socket state: {other:?}"),
+    }
+}
